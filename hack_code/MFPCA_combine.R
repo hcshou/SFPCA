@@ -9,7 +9,7 @@
 ###
 ### Input of the function "HD_MFPCA_full"
 ###
-### y:      a data matrix containing functional responses. Each row contains measurements 
+### y:      a data matrix of dimension n by p containing functional responses. Each row contains measurements 
 ###         from a function at a set of grid points, and each column contains measurements
 ###         of all functions at a particular grid point.
 ### id:     a vector contains the id information that is used to identify clusters. 
@@ -68,7 +68,7 @@
 ###
 ############################################################################################
 HD_MFPCA_full<- function(y, id=NULL, visit=NULL, J=NULL,I=NULL, p=NULL, tstart=0, tlength=1, twoway=TRUE, hd=TRUE,
-                     smoothing=FALSE, min.K1=4, min.K2=4) {
+                     smoothing=FALSE, L=0.9, min.K1=4, min.K2=4) {
   
   ###     check the missingness of arguments
   ###     1. Either (id,visit) or (I,J) is needed for identifying clusters. 
@@ -123,43 +123,44 @@ HD_MFPCA_full<- function(y, id=NULL, visit=NULL, J=NULL,I=NULL, p=NULL, tstart=0
      }
     
       X <- resd 
+ 
   
-     ### Create index for subjects and visits 
-     
-  
-  
-    ## step 2: calculate the covariance operator in low dimensional case, assume each subject has two visits
-      system.time(UUt <- X %*% t(X))
-      SVD = svd(UUt)
-      U  = SVD$u
-      S  = SVD$d
+    ## step 2: calculate the covariance operator in high or low dimensional case
+      if(hd==TRUE){
+        system.time(UUt <- X %*% t(X))
+        SVD = svd(UUt)
+        U  = SVD$u
+        S  = SVD$d
+      }else{U <- X}
+      
     
-      n_I0 = table(id)
-      k2=sum(n_I0^2)
-      U_I=rowsum(U,id)
+      ### Create index for subjects and visits 
+      tid  <- table(id)
+      n_I0 <- tid[match(names(tid),unique(id))]
+      k2   <- sum(n_I0^2);  n    <- dim(y)[1]
+      
+      U_I  <- rowsum(U,id)
       
       ##step 1 obtain covariance matrix in the reduced dimension of U
       Ku_W = (t(U)%*%diag(n_I0[rep(1:I,n_I0)])%*%U-t(U_I)%*%(U_I))/(k2-n)
       Ku_T = t(U)%*% U/n
       Ku_B = Ku_T - Ku_W
       
+      if(hd==TRUE){
+        Ku_B<-t(t(sqrt(S)*Ku_B)*sqrt(S))
+        Ku_W<-t(t(sqrt(S)*Ku_W)*sqrt(S))
+      }   
       
-      SKuBS<-t(t(sqrt(S)*Ku_B)*sqrt(S))
-      SKuWS<-t(t(sqrt(S)*Ku_W)*sqrt(S))
-      
-      
-      #get the eigen values
-      Sigma_B=eigen(SKuBS)$values
-      Sigma_W=eigen(SKuWS)$values
-      
-      
+      #get the eigen values and eigenvectors
+      eB<-eigen(Ku_B); Sigma_B<- eB$values; A_B<- eB$vectors
+      eW<-eigen(Ku_W); Sigma_W<- eW$values; A_W<- eW$vectors      
       # end of Step 2 
       
-      # Step 3s
-      ###  determine the number of PCs to keep
-      fpca1.value <- Sigma_B 
-      fpca2.value <- Sigma_W 
-      
+      # Step 2s
+      ###  get the eigenvalues and determine the number of PCs to keep
+      fpca1.value <- Sigma_B *sqrt(p/tlength)
+      fpca2.value <- Sigma_W *sqrt(p/tlength)
+  
       ###     Keep only non-negative eigenvalues
       fpca1.value <- ifelse(fpca1.value>=0, fpca1.value, 0)
       fpca2.value <- ifelse(fpca2.value>=0, fpca2.value, 0)
@@ -172,109 +173,108 @@ HD_MFPCA_full<- function(y, id=NULL, visit=NULL, J=NULL,I=NULL, p=NULL, tstart=0
       ###     explained is greater than 90% and the variance explained by any single component
       ###     after is less than 1/p. The number of components are also no less than the 
       ###     pre-determined minimum values min.K1 or min.K2.
-      N1 <- max( which(cumsum(percent1) < 0.9 | percent1 > 1/p ) + 1, min.K1 )
-      N2 <- max( which(cumsum(percent2) < 0.9 | percent2 > 1/p ) + 1, min.K2 )
-      # end of Step 3s
+      N1 <- max( which(cumsum(percent1) < L | percent1 > 1/p ) + 1, min.K1 )
+      N2 <- max( which(cumsum(percent2) < L | percent2 > 1/p ) + 1, min.K2 )
+      # end of Step 2s
+  
+      # output reliability ratio
+      lambda<-sum(fpca1.value)/sum(fpca1.value+fpca2.value)
+  
+      # end of Step 2 
+  
+      # Step 3 
+      if(hd==TRUE){
+        Cs = t(UT_1)%*%X1+t(UT_2)%*%X2
+        # record on a hard-drive. otherwise the memory will be exhaused.
+        Phi_B = t(A_B/sqrt(S))%*%Cs
+        Phi_W = t(A_W/sqrt(S))%*%Cs
+      } 
+      # end of Step 3 
+        
+  
+     AN1_B = A_B[, 1:N1]; AN2_W = A_W[, 1:N2]
+     lambda1e = fpca1.value[1:N1]*(fpca1.value[1:N1]>0);
+     lambda2e = fpca2.value[1:N2]*(fpca2.value[1:N2]>0)
+     phi1e = t(AN1_B); phi2e = t(AN2_W)
+  
+      # Step 4 obtain PC scores in low-dimensional case
+      ###     First, calculate the inner product (the cosine of the angles) between 
+      ###     level 1 eigenfunctions and level 2 eigenfunctions
+      cross.integral <- phi1e
+      for(i in 1:N1)
+        for(j in 1:N2) 
+          cross.integral[i,j] <- sum(fpca1.vectors[,i]* fpca2.vectors[,j]) *tlength/p
+  
+      ###     Next, calculate the inner product of each centered function with the 
+      ###     level 1 or level 2 eigenfunctions
+  
+      int1 <- phi1e %*% t(resd) * tlength /p
+      int2 <- phi2e %*% t(resd) * tlength /p
       
-  # calculate reliability ratio
-  lambda<-sum(fpca1.value)/sum(fpca1.value+fpca2.value)
-  
-  
-  
-  
-  A_B = eigen(SKuBS)$vectors
-  Sigma_B=eigen(SKuBS)$values
-  A_W = eigen(SKuWS)$vectors
-  Sigma_W=eigen(SKuWS)$values
-  #get the eigen values
-  
-  # end of Step 2 
-  
-  # Step 3 
-  Cs = t(UT_1)%*%X1+t(UT_2)%*%X2
-  # record on a hard-drive. otherwise the memory will be exhaused.
-  Phi_B = t(A_B/sqrt(S))%*%Cs
-  Phi_W = t(A_W/sqrt(S))%*%Cs
-  
-  # end of Step 3 
-  
-  
-  # Step 3s
-  ###  determine the number of PCs to keep
-  fpca1.value <- Sigma_B * tlength / p
-  fpca2.value <- Sigma_W * tlength / p 
-  ###     Keep only non-negative eigenvalues
-  fpca1.value <- ifelse(fpca1.value>=0, fpca1.value, 0)
-  fpca2.value <- ifelse(fpca2.value>=0, fpca2.value, 0)
-  ###     Calculate the percentage of variance that are explained by the components
-  percent1 <- (fpca1.value)/sum(fpca1.value)
-  percent2 <- (fpca2.value)/sum(fpca2.value)
-  
-  ###     Decide the number of components that are kept at level 1 and 2. The general
-  ###     rule is to stop at the component where the cumulative percentage of variance 
-  ###     explained is greater than 90% and the variance explained by any single component
-  ###     after is less than 1/p. The number of components are also no less than the 
-  ###     pre-determined minimum values min.K1 or min.K2.
-  N1 <- max( which(cumsum(percent1) < 0.9 | percent1 > 1/p ) + 1, min.K1 )
-  N2 <- max( which(cumsum(percent2) < 0.9 | percent2 > 1/p ) + 1, min.K2 )
-  # end of Step 3s
-  
-  # calculate reliability ratio
-  #lambda<-sum(fpca1.value)/sum(fpca1.value+fpca2.value)
-  
-  
-  AN1_B = matrix(0,nrow=I*J, ncol=N1)
-  AN2_W = matrix(0,nrow=I*J, ncol=N2)
-  phi1e = array(0,dim=c(p,N1))
-  phi2e = array(0,dim=c(p,N2))
-  
-  AN1_B = A_B[, 1:N1]
-  lambda1e = Sigma_B[1:N1]*(Sigma_B[1:N1]>0)
-  phi1e = t(Phi_B[1:N1,])
-  AN2_W = A_W[, 1:N2]
-  lambda2e = Sigma_W[1:N2]*(Sigma_W[1:N2]>0)
-  phi2e = t(Phi_W[1:N2,])
-  
-  
-  # Step 4 ## Obtain PC scores
-  dj = rep(1,J)
-  C_BW = t(AN1_B)%*% AN2_W
-  
-  D11 = J*diag(rep(1,N1))
-  D12 = kronecker(t(dj),C_BW)
-  D21 = t(D12)
-  D22 = diag(rep(1,J*N2))
-  
-  D = rbind(cbind(D11, D12),cbind(D21, D22))
-  
-  # get by subject singular vectors
-  
-  U_PC = matrix(1,I*J,I*J)
-  for (i in 1:I)
-  {
-    U_PC[2*(i-1)+1,] = UT_1[i,]
-    U_PC[2*(i-1)+2,] = UT_2[i,]
+      
+  ###     Finally, calculate the principal component scores based on the formulas
+  ###     given in the paper.
+  s1 <- matrix(0, M*J, K1)
+  s2 <- matrix(0, M*J, K2)
+  library(MASS)
+  design.xi <- ginv( diag(rep(1,K1)) - cross.integral %*% t(cross.integral) )
+  for(m in 1:M) {
+    resid <- rep(0, K1)
+    for(j in 1:J) {
+      index <- (m-1) * J + j
+      resid <- resid + ( int1[index,] - drop(cross.integral %*% int2[index,]) )/J
+    }
+    index.m <- ( (m-1) * J + 1 ) : (m*J)
+    xi.temp <- design.xi %*% resid
+    s1[index.m,] <- matrix(rep(xi.temp, each=J), nrow=J)
+    for(j in 1:J) {
+      index <- (m-1) * J + j
+      s2[index,] <- int2[index,] - drop( t(cross.integral) %*% xi.temp )
+    }
   }
   
-  ps_B = matrix(0,N1,I)
-  ps_W = matrix(0,J*N2,I)
   
   
-  for (i in 1:I)
-  {
-    rs_i = numeric(0)
-    rsb_i = t(AN1_B) %*% sqrt(diag(S))%*% t(U_PC[(2*(i-1)+1):(2*i),])%*%dj
-    rs_i = rbind(rs_i, rsb_i)
-    for (j in 1:J)
-    {
-      rsw_ij = t(AN2_W) %*% sqrt(diag(S)) %*% U_PC[(2*(i-1)+j),]
-      rs_i = rbind(rs_i, rsw_ij) 
-    } 
-    
-    ps_i = solve(D) %*% rs_i
-    ps_B[,i] = ps_i[1:N1,]
-    ps_W[,i] = ps_i[(N1+1):(N1+N2*J),]
-  }
+  
+      # Step 4 ## Obtain PC scores
+      dj = rep(1,J)
+      C_BW = t(AN1_B)%*% AN2_W
+      
+      D11 = J*diag(rep(1,N1))
+      D12 = kronecker(t(dj),C_BW)
+      D21 = t(D12)
+      D22 = diag(rep(1,J*N2))
+      
+      D = rbind(cbind(D11, D12),cbind(D21, D22))
+      
+      # get by subject singular vectors
+      
+      U_PC = matrix(1,I*J,I*J)
+      for (i in 1:I)
+      {
+        U_PC[2*(i-1)+1,] = UT_1[i,]
+        U_PC[2*(i-1)+2,] = UT_2[i,]
+      }
+      
+      ps_B = matrix(0,N1,I)
+      ps_W = matrix(0,J*N2,I)
+      
+      
+      for (i in 1:I)
+      {
+        rs_i = numeric(0)
+        rsb_i = t(AN1_B) %*% sqrt(diag(S))%*% t(U_PC[(2*(i-1)+1):(2*i),])%*%dj
+        rs_i = rbind(rs_i, rsb_i)
+        for (j in 1:J)
+        {
+          rsw_ij = t(AN2_W) %*% sqrt(diag(S)) %*% U_PC[(2*(i-1)+j),]
+          rs_i = rbind(rs_i, rsw_ij) 
+        } 
+        
+        ps_i = solve(D) %*% rs_i
+        ps_B[,i] = ps_i[1:N1,]
+        ps_W[,i] = ps_i[(N1+1):(N1+N2*J),]
+      }
   
   
   ###     Return the results from multilevel FPCA as a list
